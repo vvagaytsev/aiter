@@ -8,7 +8,7 @@ compiles them up front so the runtime JIT path hits the cache.
 | Module | Description |
 | --- | --- |
 | `moe.py` | Every FlyDSL kernel the tuned fused-MoE / FHMoE / gfx1250 grouped rows reach, by replaying `fused_moe` itself (see below) |
-| `gemm.py` | Every FlyDSL kernel the tuned GEMM tables reach, by replaying each table's public GEMM entry (see below) |
+| `gemm.py` | Every FlyDSL kernel the tuned GEMM tables reach, including per-1x32 MFMA-tile scales, by replaying each table's public GEMM entry (see below) |
 | `conv.py` | conv3d implicit-GEMM kernels and the NCDHW->NDHWC pre-transpose, by replaying `flydsl_conv_implicit` |
 | `chunk_gdn_h.py` | chunk-gdn-h opt (K5) kernels, by replaying `chunk_gated_delta_rule_fwd_h_flydsl_opt` |
 | `gdn_fused_prefill.py` | gfx950 single-kernel GDN prefill, by replaying `gdn_fused_prefill_fwd` per head shape in `DEFAULT_SHAPES` |
@@ -126,9 +126,12 @@ and launches them; every FlyDSL launch is compiled into the cache instead.
   fp16 output, which their rows leave open),
   `gemm_a8w8_blockscale_abpreshuffle`, `gemm_a8w8_mxfp8_bpreshuffle`,
   `gemm_a8w8_blockscale_bpreshuffle` with e8m0 scales,
+  `gemm_a8w8_mxscale_preshuffle_1x32_flydsl`,
   `batched_gemm_a8w8_mxscale_bpreshuffle`, `gemm_a16w16` and `gemm_a4w4`.
-  A row tuned at M also serves the M down to the previous tuned M
-  of its shape. On gfx1250 (`SCAN_ARCHS`) those M are identified first:
+  The preshuffled-scale table uses exact M lookup, so only its tuned M is
+  replayed; its untuned-shape heuristic is not precompiled by this table.
+  For padded-M tables, a row tuned at M also serves the M down to the previous
+  tuned M of its shape. On gfx1250 (`SCAN_ARCHS`) those M are identified first:
   replayed with each FlyDSL launch stopped at its cache key, so nothing
   compiles. Not every M is identified, only those `scan_sizes` names, where
   the runtime's choice can change: on each piece of the range where the
@@ -143,7 +146,7 @@ and launches them; every FlyDSL launch is compiled into the cache instead.
   number of M tiles and specialize a ragged last tile: M=5120 and M=6144 can
   request one kernel and M=5632 another. Rows of other archs are replayed at
   both ends and bisected between them where they request different kernels
-  (`[BISECT]`). Either way this reaches the FlyDSL heuristic kernels the
+  (`[BISECT]`). For padded-M tables, this reaches the FlyDSL heuristic kernels the
   runtime falls back to below a shape's smallest tuned M; the scan also
   reaches them past a smallest M the runtime refuses. The a4w4 table's
   non-FlyDSL rows are replayed too, since M below them falls back to FlyDSL.

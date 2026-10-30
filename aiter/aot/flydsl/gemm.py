@@ -214,6 +214,38 @@ def _a8w8_blockscale_mxscale_bpreshuffle(job: dict) -> None:
     )
 
 
+def _mxscale_preshuffle_1x32(job: dict) -> None:
+    import torch
+
+    from aiter.ops.flydsl.gemm_tune.flydsl_gemm_mxscale_preshuffle_common import (
+        mxscale_preshuffle_1x32_params,
+    )
+    from aiter.ops.flydsl.mxscale_preshuffle_kernels import (
+        _mx_mfma_tile_1x32_scale_shape,
+        gemm_a8w8_mxscale_preshuffle_1x32_flydsl,
+    )
+    from aiter.utility import dtypes
+
+    m, n, k = job["m"], job["n"], job["k"]
+    a_dtype, b_dtype = job["a_dtype"], job["b_dtype"]
+    parsed = mxscale_preshuffle_1x32_params(
+        job["kernel_name"], a_dtype=a_dtype, b_dtype=b_dtype
+    )
+    if parsed is None:
+        raise ValueError(f"not a FlyDSL MX-scale row: {job['kernel_name']}")
+    out_dtype = dtypes.bf16 if parsed["out_dtype"] == "bf16" else dtypes.fp16
+    gemm_a8w8_mxscale_preshuffle_1x32_flydsl(
+        _empty(m, k // 2 if a_dtype == "fp4" else k, dtype=torch.uint8),
+        _empty(n, k // 2 if b_dtype == "fp4" else k, dtype=torch.uint8),
+        _empty(*_mx_mfma_tile_1x32_scale_shape(m, k), dtype=torch.uint8),
+        _empty(*_mx_mfma_tile_1x32_scale_shape(n, k), dtype=torch.uint8),
+        _empty(m, n, dtype=out_dtype),
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        require_tuned=True,
+    )
+
+
 def _batched_a8w8_mxscale_bpreshuffle(job: dict) -> None:
     from aiter.ops.batched_gemm_op_a8w8 import batched_gemm_a8w8_mxscale_bpreshuffle
     from aiter.utility import dtypes
@@ -337,6 +369,12 @@ TABLES = (
         _a8w8_blockscale_mxscale_bpreshuffle,
     ),
     Table(
+        "mxscale_preshuffle_tuned_gemm",
+        "AITER_CONFIG_GEMM_MXSCALE_PRESHUFFLE",
+        ("gfx", "cu_num", "N", "K", "a_dtype", "b_dtype"),
+        _mxscale_preshuffle_1x32,
+    ),
+    Table(
         "batched_gemm_a8w8_blockscale_mxscale_bpreshuffle_tuned",
         "AITER_CONFIG_BATCHED_GEMM_A8W8_BLOCKSCALE_MXSCALE_BPRESHUFFLE",
         ("gfx", "b", "n", "k", "w_scale_block"),
@@ -411,7 +449,25 @@ def parse_csv(csv_path: str) -> list[dict]:
     jobs = []
     for row in rows:
         kernel_name = _column(row, "kernelName")
-        if not table.all_rows and not (
+        if table.caller is _mxscale_preshuffle_1x32:
+            from aiter.ops.flydsl.gemm_tune.flydsl_gemm_mxscale_preshuffle_common import (
+                mxscale_preshuffle_1x32_params,
+            )
+
+            libtype = row.get("libtype")
+            if libtype is not None:
+                libtype = libtype.strip()
+            if (
+                mxscale_preshuffle_1x32_params(
+                    kernel_name,
+                    a_dtype=_column(row, "a_dtype"),
+                    b_dtype=_column(row, "b_dtype"),
+                    libtype=libtype,
+                )
+                is None
+            ):
+                continue
+        elif not table.all_rows and not (
             kernel_name.startswith(table.kernel_prefix)
             if table.kernel_prefix
             else _column(row, "libtype") == "flydsl"
@@ -426,7 +482,11 @@ def parse_csv(csv_path: str) -> list[dict]:
             "gfx": _column(row, "gfx"),
             "cu_num": _int(_column(row, "cu_num"), _DEFAULT_CU_NUM),
             "m": m,
-            "m_low": max(smaller, default=0) + 1,
+            "m_low": (
+                m
+                if table.caller is _mxscale_preshuffle_1x32
+                else max(smaller, default=0) + 1
+            ),
             "tuned": tuple((tm, *_tiling(name)) for tm, name in shapes[key].items()),
             "n": _int(_column(row, "N")),
             "k": _int(_column(row, "K")),

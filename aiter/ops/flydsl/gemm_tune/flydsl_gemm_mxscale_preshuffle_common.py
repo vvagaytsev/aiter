@@ -205,6 +205,102 @@ def parse_kernel_name(name: str):
     }
 
 
+def validate_mxscale_preshuffle_1x32_launch(
+    tile_m: int, tile_n: int, tile_k: int, split_k: int, a_dtype: str
+) -> None:
+    for name, value in (
+        ("tile_m", tile_m),
+        ("tile_n", tile_n),
+        ("tile_k", tile_k),
+        ("split_k", split_k),
+    ):
+        if value <= 0:
+            raise ValueError(f"{name} must be positive, got {value}")
+    if tile_m % 32 != 0:
+        raise ValueError(
+            f"per-1x32 MX preshuffle requires tile_m ({tile_m}) to be a "
+            "multiple of 32; tile_m=16 is the coarse blockscale specialization"
+        )
+    if tile_k not in (128, 256):
+        raise ValueError(
+            f"per-1x32 MX preshuffle requires tile_k 128 or 256, got {tile_k}"
+        )
+    if tile_n % _MFMA_N:
+        raise ValueError(f"tile_n ({tile_n}) must be a multiple of {_MFMA_N}")
+    n_waves = min(_WAVES_PER_WG, tile_n // _MFMA_N)
+    if tile_n % (n_waves * _MFMA_N):
+        raise ValueError(f"tile_n ({tile_n}) must give each wave whole 16-column tiles")
+    chunks_per_wave = tile_n // (n_waves * _MFMA_N)
+    if chunks_per_wave > 1 and chunks_per_wave % 2:
+        raise ValueError(
+            f"tile_n ({tile_n}) needs row-layout scales for an odd chunk count"
+        )
+    if tile_m * _a_row_bytes(a_dtype, tile_k) % (n_waves * 64 * 16):
+        raise ValueError(
+            f"tile {tile_m}x{tile_n}x{tile_k} has an incomplete A cooperative load"
+        )
+
+
+def mxscale_preshuffle_1x32_params(
+    kernel_name: str,
+    *,
+    a_dtype: str,
+    b_dtype: str,
+    out_dtype: str | None = None,
+    libtype: str | None = None,
+):
+    """Validate a tuned mxpsh name for the per-1x32 mfma_tile contract.
+
+    Non-FlyDSL rows and output-dtype mismatches are misses; malformed names,
+    fused split-K, and operand-dtype mismatches are errors.
+    """
+    if libtype is not None and libtype != "flydsl":
+        return None
+    if a_dtype not in ("fp4", "fp6", "fp8"):
+        raise ValueError(f"unsupported a_dtype {a_dtype!r}")
+    if b_dtype not in ("fp4", "fp8"):
+        raise ValueError(f"unsupported b_dtype {b_dtype!r}")
+    if not isinstance(kernel_name, str) or not kernel_name.strip():
+        raise ValueError("an mxpsh kernel name is required")
+    try:
+        parsed = parse_kernel_name(kernel_name)
+    except KeyError as error:
+        raise ValueError(f"{kernel_name!r} contains an unsupported dtype") from error
+    if parsed is None:
+        raise ValueError(f"{kernel_name!r} is not an mxpsh kernel name")
+    if parsed["fused_split_k"]:
+        raise ValueError(f"{kernel_name}: fused split-K requires row-layout scales")
+    if parsed["prefetch"] or parsed["b_nt"]:
+        raise ValueError(f"{kernel_name}: prefetch requires row-layout scales")
+    if (parsed["a_dtype"], parsed["b_dtype"]) != (a_dtype, b_dtype):
+        raise ValueError(
+            f"{kernel_name}: encodes {parsed['a_dtype']}/{parsed['b_dtype']}, "
+            f"expected {a_dtype}/{b_dtype}"
+        )
+    if parsed["out_dtype"] not in ("bf16", "fp16"):
+        raise ValueError(
+            f"{kernel_name}: unsupported output dtype {parsed['out_dtype']}"
+        )
+    if out_dtype is not None and parsed["out_dtype"] != out_dtype:
+        return None
+    validate_mxscale_preshuffle_1x32_launch(
+        parsed["tile_m"],
+        parsed["tile_n"],
+        parsed["tile_k"],
+        parsed["split_k"],
+        a_dtype,
+    )
+    return parsed
+
+
+# Each operand's e8m0 scale is a block and a layout -- the kernel's
+# a_/b_scale_block and a_/b_scale_layout Constexprs. A block is "1x32", or the
+# coarse "1x128" (A) / "128x128" (B) broadcast to the 1x32 MFMA (a8w8 only).
+# A layout is "mfma_tile" (pre-shuffled by the caller) or "row" (the unshuffled
+# scale as quantized, a8w8, staged by the kernel: row-major [rows, K // 32] for
+# 1x32; B's "32x32" row-major [N // 32, K // 32], its panel DMA repeating each
+# scale row over its 32 N-rows; A's "1x128" the blockscale column-major
+# [K // 128, M] bytes; B's "128x128" [N // 128, K // 128] -- bmm's scales).
 SCALE_BLOCKS_A = ("1x32", "1x128")
 SCALE_BLOCKS_B = ("1x32", "128x128", "32x32")
 SCALE_LAYOUTS = ("mfma_tile", "row")

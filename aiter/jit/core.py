@@ -240,6 +240,11 @@ AITER_CONFIG_MQA_LOGITS = os.getenv(
     f"{AITER_ROOT_DIR}/aiter/configs/tuned_mqa_logits.csv",
 )
 
+AITER_CONFIG_GEMM_MXSCALE_PRESHUFFLE = os.getenv(
+    "AITER_CONFIG_GEMM_MXSCALE_PRESHUFFLE",
+    f"{AITER_ROOT_DIR}/aiter/configs/mxscale_preshuffle_tuned_gemm.csv",
+)
+
 # K5 opt BV tuned config. Per-model tuned rows live under model_configs/
 # (qwen3_5_*_chunk_gdn_h_opt_tuned.csv) and get merged into this canonical file by
 # get_config_file. It ships header-only: with no per-model table present
@@ -450,6 +455,14 @@ class AITER_CONFIG:
             "AITER_CONFIG_MQA_LOGITS",
             AITER_CONFIG_MQA_LOGITS,
             "tuned_mqa_logits",
+        )
+
+    @property
+    def AITER_CONFIG_GEMM_MXSCALE_PRESHUFFLE_FILE(self):
+        return self.get_config_file(
+            "AITER_CONFIG_GEMM_MXSCALE_PRESHUFFLE",
+            AITER_CONFIG_GEMM_MXSCALE_PRESHUFFLE,
+            "mxscale_preshuffle_tuned_gemm",
         )
 
     @property
