@@ -15,19 +15,23 @@ compiles into the cache instead. This module only builds what a caller passes
 in, so a kernel, its name parser or its launcher can change without an AOT
 change.
 
-A row tuned at M also serves the M between the previous tuned M of its shape
-and M, and some compile-time parameters follow the actual M (a4w4's cluster_m
-and bounded-M variants, mxfp8's split-K and cluster fallbacks), so every row
-is replayed at its M and at the smaller M it serves. On gfx1250 those M are
-identified without compiling at the sizes where the runtime's choice can
-change (:func:`scan_sizes`: tile-count edges, padded-M lookup pieces, the
-heuristics' size classes), and one M per set of kernels they request is
-replayed (``SCAN_ARCHS``, ``replay.py``): bisecting between the two ends
-would not do there, as cluster_m is the largest that divides M's tile count,
-so the kernels change and change back as M grows. Rows of other archs
+For padded-M tables, a row tuned at M also serves the M between the previous
+tuned M of its shape and M, and some compile-time parameters follow the actual
+M (a4w4's cluster_m and bounded-M variants, mxfp8's split-K and cluster
+fallbacks), so every row is replayed at its M and at the smaller M it serves.
+On gfx1250 those M are identified without compiling at the sizes where the
+runtime's choice can change (:func:`scan_sizes`: tile-count edges, padded-M
+lookup pieces, the heuristics' size classes), and one M per set of kernels they
+request is replayed (``SCAN_ARCHS``, ``replay.py``): bisecting between the two
+ends would not do there, as cluster_m is the largest that divides M's tile
+count, so the kernels change and change back as M grows. Rows of other archs
 are replayed at the smallest M they serve and bisected between the two ends
 where they request different kernels. Either way that also reaches the FlyDSL
 heuristic kernels the runtime falls back to below a shape's smallest tuned M.
+
+The per-1x32 preshuffled-scale table uses exact M lookup, so only tuned M
+values are replayed. Its untuned-shape heuristic is not precompiled by this
+table.
 
 Rows are replayed for the arch their ``gfx`` column names (``cu_num`` for
 legacy rows); with ``GPU_ARCHS`` naming targets, only those archs. The
@@ -431,8 +435,9 @@ def _column(row: dict, name: str) -> str:
 def parse_csv(csv_path: str) -> list[dict]:
     """One job per FlyDSL row of a tuned GEMM table: its shape and key cells,
     ``m`` its tuned M, ``m_low`` the smallest M it serves (the previous
-    tuned M of its shape, plus one) and ``tuned``, every tuned M of its shape
-    with its kernel's (tile_m, cluster_m)."""
+    tuned M of its shape plus one for padded-M tables, or its tuned M for
+    the exact-M preshuffled-scale table), and ``tuned``, every tuned M of
+    its shape with its kernel's (tile_m, cluster_m)."""
     table = table_of(csv_path)
     if table is None:
         raise ValueError(
